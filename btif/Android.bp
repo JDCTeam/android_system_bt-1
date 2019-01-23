@@ -6,12 +6,8 @@ btifCommonIncludes = [
     "system/bt/bta/sys",
     "system/bt/bta/dm",
     "system/bt/btcore/include",
-<<<<<<< HEAD
     "system/bt/device/include",
     "system/bt/internal_include",
-=======
-    "system/bt/include",
->>>>>>> parent of 57f6508cf... eSCO: BT 4.1 Enhanced SCO command (1/5)
     "system/bt/stack/include",
     "system/bt/stack/l2cap",
     "system/bt/stack/a2dp",
