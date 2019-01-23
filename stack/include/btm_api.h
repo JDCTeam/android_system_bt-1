@@ -26,8 +26,7 @@
 #define BTM_API_H
 
 #include "bt_target.h"
-#include "device/include/esco_parameters.h"
-#include "hcimsgs.h"
+#include "hcidefs.h"
 #include "sdp_api.h"
 
 #include "smp_api.h"
@@ -1094,7 +1093,8 @@ extern uint16_t BTM_ReadScoDiscReason(void);
  *                  BTM_BUSY if there are one or more active (e)SCO links.
  *
  ******************************************************************************/
-extern tBTM_STATUS BTM_SetEScoMode(enh_esco_params_t* p_parms);
+extern tBTM_STATUS BTM_SetEScoMode(tBTM_SCO_TYPE sco_mode,
+                                   tBTM_ESCO_PARAMS* p_parms);
 
 /*******************************************************************************
  *
@@ -1190,7 +1190,7 @@ extern tBTM_STATUS BTM_ChangeEScoLinkParms(uint16_t sco_inx,
  *
  ******************************************************************************/
 extern void BTM_EScoConnRsp(uint16_t sco_inx, uint8_t hci_status,
-                            enh_esco_params_t* p_parms);
+                            tBTM_ESCO_PARAMS* p_parms);
 
 /*******************************************************************************
  *
@@ -2004,7 +2004,7 @@ extern uint8_t BTM_GetEirUuidList(uint8_t* p_eir, size_t eir_len,
  *
  *
  ******************************************************************************/
-extern tBTM_STATUS BTM_ConfigScoPath(esco_data_path_t path,
+extern tBTM_STATUS BTM_ConfigScoPath(tBTM_SCO_ROUTE_TYPE path,
                                      tBTM_SCO_DATA_CB* p_sco_data_cb,
                                      tBTM_SCO_PCM_PARAM* p_pcm_param,
                                      bool err_data_rpt);

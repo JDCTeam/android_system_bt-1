@@ -35,7 +35,6 @@
 #include "btm_int_types.h"
 #include "btu.h"
 #include "device/include/controller.h"
-#include "device/include/esco_parameters.h"
 #include "hcidefs.h"
 #include "hcimsgs.h"
 #include "osi/include/osi.h"
@@ -60,7 +59,17 @@
 /*            L O C A L    F U N C T I O N     P R O T O T Y P E S            */
 /******************************************************************************/
 
-static uint16_t btm_sco_voice_settings_to_legacy(enh_esco_params_t* p_parms);
+static const tBTM_ESCO_PARAMS btm_esco_defaults = {
+    BTM_64KBITS_RATE,             /* TX Bandwidth (64 kbits/sec)              */
+    BTM_64KBITS_RATE,             /* RX Bandwidth (64 kbits/sec)              */
+    0x000c,                       /* 12 ms (HS/HF can use EV3, 2-EV3, 3-EV3)  */
+    0x0060,                       /* Inp Linear, Air CVSD, 2s Comp, 16bit     */
+    (BTM_SCO_PKT_TYPES_MASK_HV1 + /* Packet Types                             */
+     BTM_SCO_PKT_TYPES_MASK_HV2 + BTM_SCO_PKT_TYPES_MASK_HV3 +
+     BTM_SCO_PKT_TYPES_MASK_EV3 + BTM_SCO_PKT_TYPES_MASK_EV4 +
+     BTM_SCO_PKT_TYPES_MASK_EV5),
+    BTM_ESCO_RETRANS_QUALITY /* Retransmission Effort */
+};
 
 /*******************************************************************************
  *
@@ -84,11 +93,18 @@ void btm_sco_flush_sco_data(UNUSED_ATTR uint16_t sco_inx) {}
  *
  ******************************************************************************/
 void btm_sco_init(void) {
+
+#if (BTM_SCO_HCI_INCLUDED == TRUE)
+  for (int i = 0; i < BTM_MAX_SCO_LINKS; i++)
+    btm_cb.sco_cb.sco_db[i].xmit_data_q = fixed_queue_new(SIZE_MAX);
+#endif
+
   /* Initialize nonzero defaults */
   btm_cb.sco_cb.sco_disc_reason = BTM_INVALID_SCO_DISC_REASON;
-  btm_cb.sco_cb.def_esco_parms = esco_parameters_for_codec(ESCO_CODEC_CVSD);
-  btm_cb.sco_cb.def_esco_parms.max_latency_ms = 12;
-  btm_cb.sco_cb.sco_route = ESCO_DATA_PATH_PCM;
+
+  btm_cb.sco_cb.def_esco_parms =
+      btm_esco_defaults; /* Initialize with defaults */
+  btm_cb.sco_cb.desired_sco_mode = BTM_DEFAULT_SCO_MODE;
 }
 
 /*******************************************************************************
@@ -107,11 +123,13 @@ void btm_sco_init(void) {
  * Returns          void
  *
  ******************************************************************************/
-static void btm_esco_conn_rsp(uint16_t sco_inx, uint8_t hci_status,
-                              const RawAddress& bda,
-                              enh_esco_params_t* p_parms) {
+
+static void btm_esco_conn_rsp(uint16_t sco_inx, uint8_t hci_status, BD_ADDR bda,
+                              tBTM_ESCO_PARAMS* p_parms) {
 #if (BTM_MAX_SCO_LINKS > 0)
   tSCO_CONN* p_sco = NULL;
+  tBTM_ESCO_PARAMS* p_setup;
+  uint16_t temp_pkt_types;
 
   if (sco_inx < BTM_MAX_SCO_LINKS) p_sco = &btm_cb.sco_cb.sco_db[sco_inx];
 
@@ -130,7 +148,7 @@ static void btm_esco_conn_rsp(uint16_t sco_inx, uint8_t hci_status,
   } else /* Connection is being accepted */
   {
     p_sco->state = SCO_ST_CONNECTING;
-    enh_esco_params_t* p_setup = &p_sco->esco.setup;
+    p_setup = &p_sco->esco.setup;
     /* If parameters not specified use the default */
     if (p_parms)
       *p_setup = *p_parms;
@@ -139,56 +157,34 @@ static void btm_esco_conn_rsp(uint16_t sco_inx, uint8_t hci_status,
       *p_setup = btm_cb.sco_cb.def_esco_parms;
     }
 
-    uint16_t temp_packet_types =
-        (p_setup->packet_types & BTM_SCO_SUPPORTED_PKTS_MASK &
-         btm_cb.btm_sco_pkt_types_supported);
+    temp_pkt_types = (p_setup->packet_types & BTM_SCO_SUPPORTED_PKTS_MASK &
+                      btm_cb.btm_sco_pkt_types_supported);
 
     /* Make sure at least one eSCO packet type is sent, else might confuse peer
      */
     /* Taking this out to confirm with BQB tests
     ** Real application would like to include this though, as many devices
     ** do not retry with SCO only if an eSCO connection fails.
-    if (!(temp_packet_types & BTM_ESCO_LINK_ONLY_MASK))
+    if (!(temp_pkt_types & BTM_ESCO_LINK_ONLY_MASK))
     {
-        temp_packet_types |= BTM_SCO_PKT_TYPES_MASK_EV3;
+        temp_pkt_types |= BTM_SCO_PKT_TYPES_MASK_EV3;
     }
     */
     /* If SCO request, remove eSCO packet types (conformance) */
     if (p_sco->esco.data.link_type == BTM_LINK_TYPE_SCO) {
-      temp_packet_types &= BTM_SCO_LINK_ONLY_MASK;
-      temp_packet_types |= BTM_SCO_EXCEPTION_PKTS_MASK;
+      temp_pkt_types &= BTM_SCO_LINK_ONLY_MASK;
+      temp_pkt_types |= BTM_SCO_EXCEPTION_PKTS_MASK;
     } else {
       /* OR in any exception packet types */
-      temp_packet_types |=
+      temp_pkt_types |=
           ((p_setup->packet_types & BTM_SCO_EXCEPTION_PKTS_MASK) |
            (btm_cb.btm_sco_pkt_types_supported & BTM_SCO_EXCEPTION_PKTS_MASK));
     }
 
-    /* Use Enhanced Synchronous commands if supported */
-    if (controller_get_interface()
-            ->supports_enhanced_setup_synchronous_connection()) {
-      /* Use the saved SCO routing */
-      p_setup->input_data_path = p_setup->output_data_path =
-          btm_cb.sco_cb.sco_route;
-
-      BTM_TRACE_DEBUG(
-          "%s:  txbw 0x%x, rxbw 0x%x, "
-          "lat 0x%x, retrans 0x%02x, pkt 0x%04x, path %u",
-          __func__, p_setup->transmit_bandwidth, p_setup->receive_bandwidth,
-          p_setup->max_latency_ms, p_setup->retransmission_effort,
-          p_setup->packet_types, p_setup->input_data_path);
-
-      btsnd_hcic_enhanced_accept_synchronous_connection(bda, p_setup);
-
-    } else /* Use older command */
-    {
-      /* needed if enhanced HCI cmds not supported */
-      uint16_t voice_content_format = btm_sco_voice_settings_to_legacy(p_setup);
-      btsnd_hcic_accept_esco_conn(
-          bda, p_setup->transmit_bandwidth, p_setup->receive_bandwidth,
-          p_setup->max_latency_ms, voice_content_format,
-          p_setup->retransmission_effort, p_setup->packet_types);
-    }
+    btsnd_hcic_accept_esco_conn(bda, p_setup->tx_bw, p_setup->rx_bw,
+                                p_setup->max_latency, p_setup->voice_contfmt,
+                                p_setup->retrans_effort, temp_pkt_types);
+    p_setup->packet_types = temp_pkt_types;
   }
 #endif
 }
@@ -227,6 +223,54 @@ void btm_route_sco_data(BT_HDR* p_msg) {
  *
  *
  ******************************************************************************/
+
+#if (BTM_SCO_HCI_INCLUDED == TRUE && BTM_MAX_SCO_LINKS > 0)
+tBTM_STATUS BTM_WriteScoData(uint16_t sco_inx, BT_HDR* p_buf) {
+  tSCO_CONN* p_ccb = &btm_cb.sco_cb.sco_db[sco_inx];
+  uint8_t* p;
+  tBTM_STATUS status = BTM_SUCCESS;
+
+  if (sco_inx < BTM_MAX_SCO_LINKS && btm_cb.sco_cb.p_data_cb &&
+      p_ccb->state == SCO_ST_CONNECTED) {
+    /* Ensure we have enough space in the buffer for the SCO and HCI headers */
+    if (p_buf->offset < HCI_SCO_PREAMBLE_SIZE) {
+      BTM_TRACE_ERROR("BTM SCO - cannot send buffer, offset: %d",
+                      p_buf->offset);
+      osi_free(p_buf);
+      status = BTM_ILLEGAL_VALUE;
+    } else /* write HCI header */
+    {
+      /* Step back 3 bytes to add the headers */
+      p_buf->offset -= HCI_SCO_PREAMBLE_SIZE;
+      /* Set the pointer to the beginning of the data */
+      p = (uint8_t*)(p_buf + 1) + p_buf->offset;
+      /* add HCI handle */
+      UINT16_TO_STREAM(p, p_ccb->hci_handle);
+      /* only sent the first BTM_SCO_DATA_SIZE_MAX bytes data if more than max,
+         and set warning status */
+      if (p_buf->len > BTM_SCO_DATA_SIZE_MAX) {
+        p_buf->len = BTM_SCO_DATA_SIZE_MAX;
+        status = BTM_SCO_BAD_LENGTH;
+      }
+
+      UINT8_TO_STREAM(p, (uint8_t)p_buf->len);
+      p_buf->len += HCI_SCO_PREAMBLE_SIZE;
+
+      fixed_queue_enqueue(p_ccb->xmit_data_q, p_buf);
+
+      btm_sco_check_send_pkts(sco_inx);
+    }
+  } else {
+    osi_free(p_buf);
+
+    BTM_TRACE_WARNING("BTM_WriteScoData, invalid sco index: %d at state [%d]",
+                      sco_inx, btm_cb.sco_cb.sco_db[sco_inx].state);
+    status = BTM_UNKNOWN_ADDR;
+  }
+
+  return (status);
+}
+#else
 tBTM_STATUS BTM_WriteScoData(UNUSED_ATTR uint16_t sco_inx,
                              UNUSED_ATTR BT_HDR* p_buf) {
   return (BTM_NO_RESOURCES);
@@ -244,7 +288,9 @@ tBTM_STATUS BTM_WriteScoData(UNUSED_ATTR uint16_t sco_inx,
  *
  ******************************************************************************/
 static tBTM_STATUS btm_send_connect_request(uint16_t acl_handle,
-                                            enh_esco_params_t* p_setup) {
+                                            tBTM_ESCO_PARAMS* p_setup) {
+  uint16_t temp_pkt_types;
+  uint8_t xx;
   tACL_CONN* p_acl;
 
   /* Send connect request depending on version of spec */
@@ -253,47 +299,46 @@ static tBTM_STATUS btm_send_connect_request(uint16_t acl_handle,
               << unsigned(acl_handle);
     btsnd_hcic_add_SCO_conn(acl_handle, BTM_ESCO_2_SCO(p_setup->packet_types));
   } else {
-    uint16_t temp_packet_types =
-        (p_setup->packet_types &
-         static_cast<uint16_t>(BTM_SCO_SUPPORTED_PKTS_MASK) &
-         btm_cb.btm_sco_pkt_types_supported);
+
+    temp_pkt_types = (p_setup->packet_types & BTM_SCO_SUPPORTED_PKTS_MASK &
+                      btm_cb.btm_sco_pkt_types_supported);
 
     /* OR in any exception packet types */
-    temp_packet_types |=
+    temp_pkt_types |=
         ((p_setup->packet_types & BTM_SCO_EXCEPTION_PKTS_MASK) |
          (btm_cb.btm_sco_pkt_types_supported & BTM_SCO_EXCEPTION_PKTS_MASK));
 
     /* Finally, remove EDR eSCO if the remote device doesn't support it */
     /* UPF25:  Only SCO was brought up in this case */
     btm_handle_to_acl_index(acl_handle);
-    uint8_t acl_index = btm_handle_to_acl_index(acl_handle);
-    if (acl_index < MAX_L2CAP_LINKS) {
-      p_acl = &btm_cb.acl_db[acl_index];
+    xx = btm_handle_to_acl_index(acl_handle);
+    if (xx < MAX_L2CAP_LINKS) {
+      p_acl = &btm_cb.acl_db[xx];
       if (!HCI_EDR_ESCO_2MPS_SUPPORTED(p_acl->peer_lmp_feature_pages[0])) {
-        BTM_TRACE_DEBUG("BTM Remote does not support 2-EDR eSCO");
-        temp_packet_types |=
-            (ESCO_PKT_TYPES_MASK_NO_2_EV3 | ESCO_PKT_TYPES_MASK_NO_2_EV5);
+
+        BTM_TRACE_WARNING("BTM Remote does not support 2-EDR eSCO");
+        temp_pkt_types |= (HCI_ESCO_PKT_TYPES_MASK_NO_2_EV3 |
+                           HCI_ESCO_PKT_TYPES_MASK_NO_2_EV5);
       }
       if (!HCI_EDR_ESCO_3MPS_SUPPORTED(p_acl->peer_lmp_feature_pages[0])) {
-        BTM_TRACE_DEBUG("BTM Remote does not support 3-EDR eSCO");
-        temp_packet_types |=
-            (ESCO_PKT_TYPES_MASK_NO_3_EV3 | ESCO_PKT_TYPES_MASK_NO_3_EV5);
+        BTM_TRACE_WARNING("BTM Remote does not support 3-EDR eSCO");
+        temp_pkt_types |= (HCI_ESCO_PKT_TYPES_MASK_NO_3_EV3 |
+                           HCI_ESCO_PKT_TYPES_MASK_NO_3_EV5);
       }
 
       /* Check to see if BR/EDR Secure Connections is being used
       ** If so, we cannot use SCO-only packet types (HFP 1.7)
       */
       if (BTM_BothEndsSupportSecureConnections(p_acl->remote_addr)) {
-        temp_packet_types &= ~(BTM_SCO_PKT_TYPE_MASK);
+        temp_pkt_types &= ~(BTM_SCO_PKT_TYPE_MASK);
         BTM_TRACE_DEBUG("%s: SCO Conn: pkt_types after removing SCO (0x%04x)",
-                        __FUNCTION__, temp_packet_types);
+                        __func__, temp_pkt_types);
 
         /* Return error if no packet types left */
-        if (temp_packet_types == 0) {
-          LOG(ERROR) << __func__
-                     << ": SCO Conn (BR/EDR SC): No packet types available for "
-                        "acl_handle "
-                     << unsigned(acl_handle);
+
+        if (temp_pkt_types == 0) {
+          BTM_TRACE_ERROR("%s: SCO Conn (BR/EDR SC): No packet types available",
+                          __func__);
           return (BTM_WRONG_MODE);
         }
       } else {
@@ -307,41 +352,16 @@ static tBTM_STATUS btm_send_connect_request(uint16_t acl_handle,
                  << " out of range for acl_handle " << unsigned(acl_handle);
     }
 
-    /* Save the previous types in case command fails */
-    uint16_t saved_packet_types = p_setup->packet_types;
-    p_setup->packet_types = temp_packet_types;
+    BTM_TRACE_API(
+        "      txbw 0x%x, rxbw 0x%x, lat 0x%x, voice 0x%x, retrans 0x%02x, pkt "
+        "0x%04x",
+        p_setup->tx_bw, p_setup->rx_bw, p_setup->max_latency,
+        p_setup->voice_contfmt, p_setup->retrans_effort, temp_pkt_types);
 
-    /* Use Enhanced Synchronous commands if supported */
-    if (controller_get_interface()
-            ->supports_enhanced_setup_synchronous_connection()) {
-      /* Use the saved SCO routing */
-      p_setup->input_data_path = p_setup->output_data_path =
-          btm_cb.sco_cb.sco_route;
-      LOG(INFO) << __func__ << std::hex << ": enhanced parameter list"
-                << " txbw=0x" << unsigned(p_setup->transmit_bandwidth)
-                << ", rxbw=0x" << unsigned(p_setup->receive_bandwidth)
-                << ", latency_ms=0x" << unsigned(p_setup->max_latency_ms)
-                << ", retransmit_effort=0x"
-                << unsigned(p_setup->retransmission_effort) << ", pkt_type=0x"
-                << unsigned(p_setup->packet_types) << ", path=0x"
-                << unsigned(p_setup->input_data_path);
-      btsnd_hcic_enhanced_set_up_synchronous_connection(acl_handle, p_setup);
-      p_setup->packet_types = saved_packet_types;
-    } else { /* Use older command */
-      uint16_t voice_content_format = btm_sco_voice_settings_to_legacy(p_setup);
-      LOG(INFO) << __func__ << std::hex << ": legacy parameter list"
-                << " txbw=0x" << unsigned(p_setup->transmit_bandwidth)
-                << ", rxbw=0x" << unsigned(p_setup->receive_bandwidth)
-                << ", latency_ms=0x" << unsigned(p_setup->max_latency_ms)
-                << ", retransmit_effort=0x"
-                << unsigned(p_setup->retransmission_effort)
-                << ", voice_content_format=0x" << unsigned(voice_content_format)
-                << ", pkt_type=0x" << unsigned(p_setup->packet_types);
-      btsnd_hcic_setup_esco_conn(
-          acl_handle, p_setup->transmit_bandwidth, p_setup->receive_bandwidth,
-          p_setup->max_latency_ms, voice_content_format,
-          p_setup->retransmission_effort, p_setup->packet_types);
-    }
+    btsnd_hcic_setup_esco_conn(acl_handle, p_setup->tx_bw, p_setup->rx_bw,
+                               p_setup->max_latency, p_setup->voice_contfmt,
+                               p_setup->retrans_effort, temp_pkt_types);
+    p_setup->packet_types = temp_pkt_types;
   }
 
   return (BTM_CMD_STARTED);
@@ -372,7 +392,7 @@ void btm_set_sco_ind_cback(tBTM_SCO_IND_CBACK* sco_ind_cb) {
  * Returns          void
  *
  ******************************************************************************/
-void btm_accept_sco_link(uint16_t sco_inx, enh_esco_params_t* p_setup,
+void btm_accept_sco_link(uint16_t sco_inx, tBTM_ESCO_PARAMS* p_setup,
                          tBTM_SCO_CB* p_conn_cb, tBTM_SCO_CB* p_disc_cb) {
 #if (BTM_MAX_SCO_LINKS > 0)
   tSCO_CONN* p_sco;
@@ -436,7 +456,7 @@ tBTM_STATUS BTM_CreateSco(const RawAddress* remote_bda, bool is_orig,
                           uint16_t pkt_types, uint16_t* p_sco_inx,
                           tBTM_SCO_CB* p_conn_cb, tBTM_SCO_CB* p_disc_cb) {
 #if (BTM_MAX_SCO_LINKS > 0)
-  enh_esco_params_t* p_setup;
+  tBTM_ESCO_PARAMS* p_setup;
   tSCO_CONN* p = &btm_cb.sco_cb.sco_db[0];
   uint16_t xx;
   uint16_t acl_handle = 0;
@@ -508,9 +528,16 @@ tBTM_STATUS BTM_CreateSco(const RawAddress* remote_bda, bool is_orig,
       } else
         p->rem_bd_known = false;
 
+      /* Link role is ignored in for this message */
+      if (pkt_types == BTM_IGNORE_SCO_PKT_TYPE)
+        pkt_types = btm_cb.sco_cb.def_esco_parms.packet_types;
+
       p_setup = &p->esco.setup;
       *p_setup = btm_cb.sco_cb.def_esco_parms;
-      p_setup->packet_types = pkt_types;
+      p_setup->packet_types =
+          (btm_cb.sco_cb.desired_sco_mode == BTM_LINK_TYPE_SCO)
+              ? (pkt_types & BTM_SCO_LINK_ONLY_MASK)
+              : pkt_types;
 
       temp_pkt_types = (p_setup->packet_types & BTM_SCO_SUPPORTED_PKTS_MASK &
                         btm_cb.btm_sco_pkt_types_supported);
@@ -522,6 +549,9 @@ tBTM_STATUS BTM_CreateSco(const RawAddress* remote_bda, bool is_orig,
             ((p_setup->packet_types & BTM_SCO_EXCEPTION_PKTS_MASK) |
              (btm_cb.btm_sco_pkt_types_supported &
               BTM_SCO_EXCEPTION_PKTS_MASK));
+      } else /* Only using SCO packet types; turn off EDR also */
+      {
+        temp_pkt_types |= BTM_SCO_EXCEPTION_PKTS_MASK;
       }
 
       p_setup->packet_types = temp_pkt_types;
@@ -546,8 +576,10 @@ tBTM_STATUS BTM_CreateSco(const RawAddress* remote_bda, bool is_orig,
       if (p->state != SCO_ST_PEND_UNPARK &&
           p->state != SCO_ST_PEND_ROLECHANGE) {
         if (is_orig) {
-          BTM_TRACE_API("%s:(e)SCO Link for ACL handle 0x%04x", __func__,
-                        acl_handle);
+          BTM_TRACE_API(
+              "BTM_CreateSco -> (e)SCO Link for ACL handle 0x%04x, Desired "
+              "Type %d",
+              acl_handle, btm_cb.sco_cb.desired_sco_mode);
 
           if ((btm_send_connect_request(acl_handle, p_setup)) !=
               BTM_CMD_STARTED) {
@@ -591,16 +623,21 @@ tBTM_STATUS BTM_CreateSco(const RawAddress* remote_bda, bool is_orig,
 void btm_sco_chk_pend_unpark(uint8_t hci_status, uint16_t hci_handle) {
 #if (BTM_MAX_SCO_LINKS > 0)
   tSCO_CONN* p = &btm_cb.sco_cb.sco_db[0];
-  for (uint16_t xx = 0; xx < BTM_MAX_SCO_LINKS; xx++, p++) {
-    uint16_t acl_handle =
-        BTM_GetHCIConnHandle(p->esco.data.bd_addr, BT_TRANSPORT_BR_EDR);
-    if ((p->state == SCO_ST_PEND_UNPARK) && (acl_handle == hci_handle)) {
-      LOG(INFO) << __func__ << ": " << p->esco.data.bd_addr
-                << " unparked, sending connection request, acl_handle="
-                << unsigned(acl_handle)
-                << ", hci_status=" << unsigned(hci_status);
-      if (btm_send_connect_request(acl_handle, &p->esco.setup) ==
-          BTM_CMD_STARTED) {
+
+
+  for (xx = 0; xx < BTM_MAX_SCO_LINKS; xx++, p++) {
+    if ((p->state == SCO_ST_PEND_UNPARK) &&
+        ((acl_handle = BTM_GetHCIConnHandle(
+              p->esco.data.bd_addr, BT_TRANSPORT_BR_EDR)) == hci_handle))
+
+    {
+      BTM_TRACE_API(
+          "btm_sco_chk_pend_unpark -> (e)SCO Link for ACL handle 0x%04x, "
+          "Desired Type %d, hci_status 0x%02x",
+          acl_handle, btm_cb.sco_cb.desired_sco_mode, hci_status);
+
+      if ((btm_send_connect_request(acl_handle, &p->esco.setup)) ==
+          BTM_CMD_STARTED)
         p->state = SCO_ST_CONNECTING;
       } else {
         LOG(ERROR) << __func__ << ": failed to send connection request for "
@@ -837,8 +874,8 @@ void btm_sco_connected(uint8_t hci_status, const RawAddress* bda,
         if (spt) {
           parms.packet_types = p->esco.setup.packet_types;
           /* Keep the other parameters the same for SCO */
-          parms.max_latency_ms = p->esco.setup.max_latency_ms;
-          parms.retransmission_effort = p->esco.setup.retransmission_effort;
+          parms.max_latency = p->esco.setup.max_latency;
+          parms.retrans_effort = p->esco.setup.retrans_effort;
 
           BTM_ChangeEScoLinkParms(xx, &parms);
         }
@@ -1057,8 +1094,8 @@ tBTM_STATUS BTM_SetScoPacketTypes(uint16_t sco_inx, uint16_t pkt_types) {
   parms.packet_types = pkt_types;
 
   /* Keep the other parameters the same for SCO */
-  parms.max_latency_ms = p->esco.setup.max_latency_ms;
-  parms.retransmission_effort = p->esco.setup.retransmission_effort;
+  parms.max_latency = p->esco.setup.max_latency;
+  parms.retrans_effort = p->esco.setup.retrans_effort;
 
   return (BTM_ChangeEScoLinkParms(sco_inx, &parms));
 #else
@@ -1208,26 +1245,41 @@ const RawAddress* BTM_ReadScoBdAddr(uint16_t sco_inx) {
  *                  BTM_BUSY if there are one or more active (e)SCO links.
  *
  ******************************************************************************/
-tBTM_STATUS BTM_SetEScoMode(enh_esco_params_t* p_parms) {
-  enh_esco_params_t* p_def = &btm_cb.sco_cb.def_esco_parms;
+tBTM_STATUS BTM_SetEScoMode(tBTM_SCO_TYPE sco_mode, tBTM_ESCO_PARAMS* p_parms) {
+  tSCO_CB* p_esco = &btm_cb.sco_cb;
+  tBTM_ESCO_PARAMS* p_def = &p_esco->def_esco_parms;
 
-  if (btm_cb.sco_cb.esco_supported) {
-    *p_def = *p_parms;
+  if (p_esco->esco_supported) {
+    if (p_parms) {
+      if (sco_mode == BTM_LINK_TYPE_ESCO)
+        *p_def = *p_parms; /* Save as the default parameters */
+      else                 /* Load only the SCO packet types */
+      {
+        p_def->packet_types = p_parms->packet_types;
+        p_def->tx_bw = BTM_64KBITS_RATE;
+        p_def->rx_bw = BTM_64KBITS_RATE;
+        p_def->max_latency = 0x000a;
+        p_def->voice_contfmt = 0x0060;
+        p_def->retrans_effort = 0;
+
+        /* OR in any exception packet types */
+        p_def->packet_types |= BTM_SCO_EXCEPTION_PKTS_MASK;
+      }
+    }
+    p_esco->desired_sco_mode = sco_mode;
+    BTM_TRACE_API("BTM_SetEScoMode -> mode %d", sco_mode);
   } else {
-    /* Load defaults for SCO only */
-    *p_def = esco_parameters_for_codec(ESCO_CODEC_CVSD);
+    p_esco->desired_sco_mode = BTM_LINK_TYPE_SCO;
     p_def->packet_types &= BTM_SCO_LINK_ONLY_MASK;
-    p_def->retransmission_effort = ESCO_RETRANSMISSION_OFF;
-    p_def->max_latency_ms = 12;
-    BTM_TRACE_WARNING("%s: BTM_SetEScoMode -> mode SCO (eSCO not supported)",
-                      __func__);
+    p_def->retrans_effort = 0;
+    BTM_TRACE_API("BTM_SetEScoMode -> mode SCO (eSCO not supported)");
   }
 
-  BTM_TRACE_API(
-      "%s: txbw 0x%08x, rxbw 0x%08x, max_lat 0x%04x, "
-      "pkt 0x%04x, rtx effort 0x%02x",
-      __func__, p_def->transmit_bandwidth, p_def->receive_bandwidth,
-      p_def->max_latency_ms, p_def->packet_types, p_def->retransmission_effort);
+  BTM_TRACE_DEBUG(
+      "    txbw 0x%08x, rxbw 0x%08x, max_lat 0x%04x, voice 0x%04x, pkt 0x%04x, "
+      "rtx effort 0x%02x",
+      p_def->tx_bw, p_def->rx_bw, p_def->max_latency, p_def->voice_contfmt,
+      p_def->packet_types, p_def->retrans_effort);
 
   return (BTM_SUCCESS);
 }
@@ -1287,7 +1339,7 @@ tBTM_STATUS BTM_ReadEScoLinkParms(uint16_t sco_inx, tBTM_ESCO_DATA* p_parms) {
 #if (BTM_MAX_SCO_LINKS > 0)
   uint8_t index;
 
-  BTM_TRACE_API("%s: -> sco_inx 0x%04x", __func__, sco_inx);
+  BTM_TRACE_API("BTM_ReadEScoLinkParms -> sco_inx 0x%04x", sco_inx);
 
   if (sco_inx < BTM_MAX_SCO_LINKS &&
       btm_cb.sco_cb.sco_db[sco_inx].state >= SCO_ST_CONNECTED) {
@@ -1298,7 +1350,8 @@ tBTM_STATUS BTM_ReadEScoLinkParms(uint16_t sco_inx, tBTM_ESCO_DATA* p_parms) {
   if (sco_inx == BTM_FIRST_ACTIVE_SCO_INDEX) {
     for (index = 0; index < BTM_MAX_SCO_LINKS; index++) {
       if (btm_cb.sco_cb.sco_db[index].state >= SCO_ST_CONNECTED) {
-        BTM_TRACE_API("%s: the first active SCO index is %d", __func__, index);
+        BTM_TRACE_API("BTM_ReadEScoLinkParms the first active SCO index is %d",
+                      index);
         *p_parms = btm_cb.sco_cb.sco_db[index].esco.data;
         return (BTM_SUCCESS);
       }
@@ -1335,17 +1388,17 @@ tBTM_STATUS BTM_ReadEScoLinkParms(uint16_t sco_inx, tBTM_ESCO_DATA* p_parms) {
 tBTM_STATUS BTM_ChangeEScoLinkParms(uint16_t sco_inx,
                                     tBTM_CHG_ESCO_PARAMS* p_parms) {
 #if (BTM_MAX_SCO_LINKS > 0)
+  tBTM_ESCO_PARAMS* p_setup;
+  tSCO_CONN* p_sco;
+  uint16_t temp_pkt_types;
 
   /* Make sure sco handle is valid and on an active link */
   if (sco_inx >= BTM_MAX_SCO_LINKS ||
       btm_cb.sco_cb.sco_db[sco_inx].state != SCO_ST_CONNECTED)
     return (BTM_WRONG_MODE);
 
-  tSCO_CONN* p_sco = &btm_cb.sco_cb.sco_db[sco_inx];
-  enh_esco_params_t* p_setup = &p_sco->esco.setup;
-
-  /* Save the previous types in case command fails */
-  uint16_t saved_packet_types = p_setup->packet_types;
+  p_sco = &btm_cb.sco_cb.sco_db[sco_inx];
+  p_setup = &p_sco->esco.setup;
 
   /* If SCO connection OR eSCO not supported just send change packet types */
   if (p_sco->esco.data.link_type == BTM_LINK_TYPE_SCO ||
@@ -1354,60 +1407,34 @@ tBTM_STATUS BTM_ChangeEScoLinkParms(uint16_t sco_inx,
         p_parms->packet_types &
         (btm_cb.btm_sco_pkt_types_supported & BTM_SCO_LINK_ONLY_MASK);
 
-    BTM_TRACE_API("%s: SCO Link for handle 0x%04x, pkt 0x%04x", __func__,
-                  p_sco->hci_handle, p_setup->packet_types);
-
-    BTM_TRACE_API("%s: SCO Link for handle 0x%04x, pkt 0x%04x", __func__,
-                  p_sco->hci_handle, p_setup->packet_types);
+    BTM_TRACE_API(
+        "BTM_ChangeEScoLinkParms -> SCO Link for handle 0x%04x, pkt 0x%04x",
+        p_sco->hci_handle, p_setup->packet_types);
 
     btsnd_hcic_change_conn_type(p_sco->hci_handle,
                                 BTM_ESCO_2_SCO(p_setup->packet_types));
-  } else /* eSCO is supported and the link type is eSCO */
-  {
-    uint16_t temp_packet_types =
-        (p_parms->packet_types & BTM_SCO_SUPPORTED_PKTS_MASK &
-         btm_cb.btm_sco_pkt_types_supported);
+  } else {
+    temp_pkt_types = (p_parms->packet_types & BTM_SCO_SUPPORTED_PKTS_MASK &
+                      btm_cb.btm_sco_pkt_types_supported);
 
     /* OR in any exception packet types */
-    temp_packet_types |=
+    temp_pkt_types |=
         ((p_parms->packet_types & BTM_SCO_EXCEPTION_PKTS_MASK) |
          (btm_cb.btm_sco_pkt_types_supported & BTM_SCO_EXCEPTION_PKTS_MASK));
-    p_setup->packet_types = temp_packet_types;
 
-    BTM_TRACE_API("%s -> eSCO Link for handle 0x%04x", __func__,
+    BTM_TRACE_API("BTM_ChangeEScoLinkParms -> eSCO Link for handle 0x%04x",
                   p_sco->hci_handle);
     BTM_TRACE_API(
-        "   txbw 0x%x, rxbw 0x%x, lat 0x%x, retrans 0x%02x, pkt 0x%04x",
-        p_setup->transmit_bandwidth, p_setup->receive_bandwidth,
-        p_parms->max_latency_ms, p_parms->retransmission_effort,
-        temp_packet_types);
+        "      txbw 0x%x, rxbw 0x%x, lat 0x%x, voice 0x%x, retrans 0x%02x, pkt "
+        "0x%04x",
+        p_setup->tx_bw, p_setup->rx_bw, p_parms->max_latency,
+        p_setup->voice_contfmt, p_parms->retrans_effort, temp_pkt_types);
 
-    /* Use Enhanced Synchronous commands if supported */
-    if (controller_get_interface()
-            ->supports_enhanced_setup_synchronous_connection()) {
-      /* Use the saved SCO routing */
-      p_setup->input_data_path = p_setup->output_data_path =
-          btm_cb.sco_cb.sco_route;
-
-      btsnd_hcic_enhanced_set_up_synchronous_connection(p_sco->hci_handle,
-                                                        p_setup);
-      p_setup->packet_types = saved_packet_types;
-    } else { /* Use older command */
-      uint16_t voice_content_format = btm_sco_voice_settings_to_legacy(p_setup);
-      /* When changing an existing link, only change latency, retrans, and
-       * pkts */
-      btsnd_hcic_setup_esco_conn(p_sco->hci_handle, p_setup->transmit_bandwidth,
-                                 p_setup->receive_bandwidth,
-                                 p_parms->max_latency_ms, voice_content_format,
-                                 p_parms->retransmission_effort,
-                                 p_setup->packet_types);
-    }
-
-    BTM_TRACE_API(
-        "%s: txbw 0x%x, rxbw 0x%x, lat 0x%x, retrans 0x%02x, pkt 0x%04x",
-        __func__, p_setup->transmit_bandwidth, p_setup->receive_bandwidth,
-        p_parms->max_latency_ms, p_parms->retransmission_effort,
-        temp_packet_types);
+    /* When changing an existing link, only change latency, retrans, and pkts */
+    btsnd_hcic_setup_esco_conn(
+        p_sco->hci_handle, p_setup->tx_bw, p_setup->rx_bw, p_parms->max_latency,
+        p_setup->voice_contfmt, p_parms->retrans_effort, temp_pkt_types);
+    p_parms->packet_types = temp_pkt_types;
   }
 
   return (BTM_CMD_STARTED);
@@ -1435,7 +1462,7 @@ tBTM_STATUS BTM_ChangeEScoLinkParms(uint16_t sco_inx,
  *
  ******************************************************************************/
 void BTM_EScoConnRsp(uint16_t sco_inx, uint8_t hci_status,
-                     enh_esco_params_t* p_parms) {
+                     tBTM_ESCO_PARAMS* p_parms) {
 #if (BTM_MAX_SCO_LINKS > 0)
   if (sco_inx < BTM_MAX_SCO_LINKS &&
       btm_cb.sco_cb.sco_db[sco_inx].state == SCO_ST_W4_CONN_RSP) {
@@ -1455,9 +1482,12 @@ void BTM_EScoConnRsp(uint16_t sco_inx, uint8_t hci_status,
  * Returns          tBTM_SCO_TYPE
  *
  ******************************************************************************/
-void btm_read_def_esco_mode(enh_esco_params_t* p_parms) {
+tBTM_SCO_TYPE btm_read_def_esco_mode(tBTM_ESCO_PARAMS* p_parms) {
 #if (BTM_MAX_SCO_LINKS > 0)
   *p_parms = btm_cb.sco_cb.def_esco_parms;
+  return btm_cb.sco_cb.desired_sco_mode;
+#else
+  return BTM_LINK_TYPE_SCO;
 #endif
 }
 
@@ -1581,114 +1611,6 @@ bool btm_is_sco_active_by_bdaddr(const RawAddress& remote_bda) {
 #endif
   return (false);
 }
-
-/*******************************************************************************
- *
- * Function         btm_sco_voice_settings_2_legacy
- *
- * Description      This function is called to convert the Enhanced eSCO
- *                  parameters into voice setting parameter mask used
- *                  for legacy setup synchronous connection HCI commands
- *
- * Returns          UINT16 - 16-bit mask for voice settings
- *
- *          HCI_INP_CODING_LINEAR           0x0000 (0000000000)
- *          HCI_INP_CODING_U_LAW            0x0100 (0100000000)
- *          HCI_INP_CODING_A_LAW            0x0200 (1000000000)
- *          HCI_INP_CODING_MASK             0x0300 (1100000000)
- *
- *          HCI_INP_DATA_FMT_1S_COMPLEMENT  0x0000 (0000000000)
- *          HCI_INP_DATA_FMT_2S_COMPLEMENT  0x0040 (0001000000)
- *          HCI_INP_DATA_FMT_SIGN_MAGNITUDE 0x0080 (0010000000)
- *          HCI_INP_DATA_FMT_UNSIGNED       0x00c0 (0011000000)
- *          HCI_INP_DATA_FMT_MASK           0x00c0 (0011000000)
- *
- *          HCI_INP_SAMPLE_SIZE_8BIT        0x0000 (0000000000)
- *          HCI_INP_SAMPLE_SIZE_16BIT       0x0020 (0000100000)
- *          HCI_INP_SAMPLE_SIZE_MASK        0x0020 (0000100000)
- *
- *          HCI_INP_LINEAR_PCM_BIT_POS_MASK 0x001c (0000011100)
- *          HCI_INP_LINEAR_PCM_BIT_POS_OFFS 2
- *
- *          HCI_AIR_CODING_FORMAT_CVSD      0x0000 (0000000000)
- *          HCI_AIR_CODING_FORMAT_U_LAW     0x0001 (0000000001)
- *          HCI_AIR_CODING_FORMAT_A_LAW     0x0002 (0000000010)
- *          HCI_AIR_CODING_FORMAT_TRANSPNT  0x0003 (0000000011)
- *          HCI_AIR_CODING_FORMAT_MASK      0x0003 (0000000011)
- *
- *          default (0001100000)
- *          HCI_DEFAULT_VOICE_SETTINGS    (HCI_INP_CODING_LINEAR \
- *                                   | HCI_INP_DATA_FMT_2S_COMPLEMENT \
- *                                   | HCI_INP_SAMPLE_SIZE_16BIT \
- *                                   | HCI_AIR_CODING_FORMAT_CVSD)
- *
- ******************************************************************************/
-static uint16_t btm_sco_voice_settings_to_legacy(enh_esco_params_t* p_params) {
-  uint16_t voice_settings = 0;
-
-  /* Convert Input Coding Format: If no uLaw or aLAW then Linear will be used
-   * (0) */
-  if (p_params->input_coding_format.coding_format == ESCO_CODING_FORMAT_ULAW)
-    voice_settings |= HCI_INP_CODING_U_LAW;
-  else if (p_params->input_coding_format.coding_format ==
-           ESCO_CODING_FORMAT_ALAW)
-    voice_settings |= HCI_INP_CODING_A_LAW;
-  /* else default value of '0 is good 'Linear' */
-
-  /* Convert Input Data Format. Use 2's Compliment as the default */
-  switch (p_params->input_pcm_data_format) {
-    case ESCO_PCM_DATA_FORMAT_1_COMP:
-      /* voice_settings |= HCI_INP_DATA_FMT_1S_COMPLEMENT;     value is '0'
-       * already */
-      break;
-
-    case ESCO_PCM_DATA_FORMAT_SIGN:
-      voice_settings |= HCI_INP_DATA_FMT_SIGN_MAGNITUDE;
-      break;
-
-    case ESCO_PCM_DATA_FORMAT_UNSIGN:
-      voice_settings |= HCI_INP_DATA_FMT_UNSIGNED;
-      break;
-
-    default: /* 2's Compliment */
-      voice_settings |= HCI_INP_DATA_FMT_2S_COMPLEMENT;
-      break;
-  }
-
-  /* Convert Over the Air Coding. Use CVSD as the default */
-  switch (p_params->transmit_coding_format.coding_format) {
-    case ESCO_CODING_FORMAT_ULAW:
-      voice_settings |= HCI_AIR_CODING_FORMAT_U_LAW;
-      break;
-
-    case ESCO_CODING_FORMAT_ALAW:
-      voice_settings |= HCI_AIR_CODING_FORMAT_A_LAW;
-      break;
-
-    case ESCO_CODING_FORMAT_MSBC:
-      voice_settings |= HCI_AIR_CODING_FORMAT_TRANSPNT;
-      break;
-
-    default: /* CVSD (0) */
-      break;
-  }
-
-  /* Convert PCM payload MSB position (0000011100) */
-  voice_settings |= (uint16_t)(((p_params->input_pcm_payload_msb_position & 0x7)
-                                << HCI_INP_LINEAR_PCM_BIT_POS_OFFS));
-
-  /* Convert Input Sample Size (0000011100) */
-  if (p_params->input_coded_data_size == 16)
-    voice_settings |= HCI_INP_SAMPLE_SIZE_16BIT;
-  else /* Use 8 bit for all others */
-    voice_settings |= HCI_INP_SAMPLE_SIZE_8BIT;
-
-  BTM_TRACE_DEBUG("%s: voice setting for legacy 0x%03x", __func__,
-                  voice_settings);
-
-  return (voice_settings);
-}
-
 #else /* SCO_EXCLUDED == TRUE (Link in stubs) */
 
 tBTM_STATUS BTM_CreateSco(const RawAddress* remote_bda, bool is_orig,
@@ -1709,7 +1631,7 @@ const RawAddress* BTM_ReadScoBdAddr(uint16_t sco_inx) {
   return ((uint8_t*)NULL);
 }
 uint16_t BTM_ReadScoDiscReason(void) { return (BTM_INVALID_SCO_DISC_REASON); }
-tBTM_STATUS BTM_SetEScoMode(enh_esco_params_t* p_parms) {
+tBTM_STATUS BTM_SetEScoMode(tBTM_SCO_TYPE sco_mode, tBTM_ESCO_PARAMS* p_parms) {
   return (BTM_MODE_UNSUPPORTED);
 }
 tBTM_STATUS BTM_RegForEScoEvts(uint16_t sco_inx,
@@ -1724,7 +1646,7 @@ tBTM_STATUS BTM_ChangeEScoLinkParms(uint16_t sco_inx,
   return (BTM_MODE_UNSUPPORTED);
 }
 void BTM_EScoConnRsp(uint16_t sco_inx, uint8_t hci_status,
-                     enh_esco_params_t* p_parms) {}
+                     tBTM_ESCO_PARAMS* p_parms) {}
 uint8_t BTM_GetNumScoLinks(void) { return (0); }
 
 #endif /* If SCO is being used */

@@ -82,7 +82,6 @@ static_library("btif") {
     "//bta/include",
     "//bta/sys",
     "//btcore/include",
-    "//device/include",
     "//embdrv/sbc/encoder/include",
     "//embdrv/sbc/decoder/include",
     "//hci/include",

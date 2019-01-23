@@ -17,7 +17,6 @@
 static_library("device") {
   sources = [
     "src/controller.cc",
-    "src/esco_parameters.cc",
     "src/interop.cc",
   ]
 

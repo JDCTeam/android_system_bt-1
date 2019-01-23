@@ -165,6 +165,142 @@ void bta_dm_co_rmt_oob(const RawAddress& bd_addr) {
   bta_dm_ci_rmt_oob(result, bd_addr, p_c, p_r);
 }
 
+
+// REMOVE FOR BLUEDROID ?
+
+#if (BTM_SCO_HCI_INCLUDED == TRUE) && (BTM_SCO_INCLUDED == TRUE)
+
+/*******************************************************************************
+ *
+ * Function         btui_sco_codec_callback
+ *
+ * Description      Callback for btui codec.
+ *
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+static void btui_sco_codec_callback(uint16_t event, uint16_t sco_handle) {
+  bta_dm_sco_ci_data_ready(event, sco_handle);
+}
+/*******************************************************************************
+ *
+ * Function         bta_dm_sco_co_init
+ *
+ * Description      This function can be used by the phone to initialize audio
+ *                  codec or for other initialization purposes before SCO
+ *                  connection is opened.
+ *
+ *
+ * Returns          tBTA_DM_SCO_ROUTE_TYPE: SCO routing configuration type.
+ *
+ ******************************************************************************/
+tBTA_DM_SCO_ROUTE_TYPE bta_dm_sco_co_init(uint32_t rx_bw, uint32_t tx_bw,
+                                          tBTA_CODEC_INFO* p_codec_type,
+                                          uint8_t app_id) {
+  tBTM_SCO_ROUTE_TYPE route = BTA_DM_SCO_ROUTE_PCM;
+
+  BTIF_TRACE_DEBUG("bta_dm_sco_co_init");
+
+  /* set up SCO routing configuration if SCO over HCI app ID is used and run
+     time
+      configuration is set to SCO over HCI */
+  /* HS invoke this call-out */
+  if (
+#if (BTA_HS_INCLUDED == TRUE)
+      (app_id == BTUI_DM_SCO_4_HS_APP_ID && btui_cfg.hs_sco_over_hci) ||
+#endif
+      /* AG invoke this call-out */
+      (app_id != BTUI_DM_SCO_4_HS_APP_ID && btui_cfg.ag_sco_over_hci)) {
+    route = btui_cb.sco_hci = BTA_DM_SCO_ROUTE_HCI;
+  }
+  /* no codec is is used for the SCO data */
+  if (p_codec_type->codec_type == BTA_SCO_CODEC_PCM &&
+      route == BTA_DM_SCO_ROUTE_HCI) {
+    /* initialize SCO codec */
+    if (!btui_sco_codec_init(rx_bw, tx_bw)) {
+      BTIF_TRACE_ERROR("codec initialization exception!");
+    }
+  }
+
+  return route;
+}
+
+/*******************************************************************************
+ *
+ * Function         bta_dm_sco_co_open
+ *
+ * Description      This function is executed when a SCO connection is open.
+ *
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+void bta_dm_sco_co_open(uint16_t handle, uint8_t pkt_size, uint16_t event) {
+  tBTUI_SCO_CODEC_CFG cfg;
+
+  if (btui_cb.sco_hci) {
+    BTIF_TRACE_DEBUG("bta_dm_sco_co_open handle:%d pkt_size:%d", handle,
+                     pkt_size);
+    cfg.p_cback = btui_sco_codec_callback;
+    cfg.pkt_size = pkt_size;
+    cfg.cb_event = event;
+    /* open and start the codec */
+    btui_sco_codec_open(&cfg);
+    btui_sco_codec_start(handle);
+  }
+}
+
+/*******************************************************************************
+ *
+ * Function         bta_dm_sco_co_close
+ *
+ * Description      This function is called when a SCO connection is closed
+ *
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+void bta_dm_sco_co_close(void) {
+  if (btui_cb.sco_hci) {
+    BTIF_TRACE_DEBUG("bta_dm_sco_co_close close codec");
+    /* close sco codec */
+    btui_sco_codec_close();
+
+    btui_cb.sco_hci = false;
+  }
+}
+
+/*******************************************************************************
+ *
+ * Function         bta_dm_sco_co_in_data
+ *
+ * Description      This function is called to send incoming SCO data to
+ *                  application.
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+void bta_dm_sco_co_in_data(BT_HDR* p_buf) {
+  if (btui_cfg.sco_use_mic)
+    btui_sco_codec_inqdata(p_buf);
+  else
+    osi_free(p_buf);
+}
+
+/*******************************************************************************
+ *
+ * Function         bta_dm_sco_co_out_data
+ *
+ * Description      This function is called to send SCO data over HCI.
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+void bta_dm_sco_co_out_data(BT_HDR** p_buf) { btui_sco_codec_readbuf(p_buf); }
+
+#endif /* (BTM_SCO_HCI_INCLUDED == TRUE) && (BTM_SCO_INCLUDED == TRUE)*/
+
 /*******************************************************************************
  *
  * Function         bta_dm_co_le_io_key_req

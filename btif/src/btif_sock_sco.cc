@@ -32,7 +32,6 @@
 #include <hardware/bt_sock.h>
 
 #include "btif_common.h"
-#include "device/include/esco_parameters.h"
 #include "osi/include/allocator.h"
 #include "osi/include/list.h"
 #include "osi/include/log.h"
@@ -64,6 +63,17 @@ typedef struct {
   bool connect_completed;
 } sco_socket_t;
 
+// TODO: verify packet types that are being sent OTA.
+static tBTM_ESCO_PARAMS sco_parameters = {
+    BTM_64KBITS_RATE, /* TX Bandwidth (64 kbits/sec)              */
+    BTM_64KBITS_RATE, /* RX Bandwidth (64 kbits/sec)              */
+    0x000a,           /* 10 ms (HS/HF can use EV3, 2-EV3, 3-EV3)  */
+    0x0060,           /* Inp Linear, Air CVSD, 2s Comp, 16bit     */
+    (BTM_SCO_LINK_ALL_PKT_MASK | BTM_SCO_PKT_TYPES_MASK_NO_2_EV5 |
+     BTM_SCO_PKT_TYPES_MASK_NO_3_EV5),
+    BTM_ESCO_RETRANS_POWER /* Retransmission effort                      */
+};
+
 static sco_socket_t* sco_socket_establish_locked(bool is_listening,
                                                  const RawAddress* bd_addr,
                                                  int* sock_fd);
@@ -90,8 +100,7 @@ bt_status_t btsock_sco_init(thread_t* thread_) {
   if (!sco_sockets) return BT_STATUS_FAIL;
 
   thread = thread_;
-  enh_esco_params_t params = esco_parameters_for_codec(ESCO_CODEC_CVSD);
-  BTM_SetEScoMode(&params);
+  BTM_SetEScoMode(BTM_LINK_TYPE_ESCO, &sco_parameters);
 
   return BT_STATUS_SUCCESS;
 }
@@ -136,7 +145,6 @@ static sco_socket_t* sco_socket_establish_locked(bool is_listening,
   sco_socket_t* sco_socket = NULL;
   socket_t* socket = NULL;
   tBTM_STATUS status;
-  enh_esco_params_t params;
 
   if (socketpair(AF_LOCAL, SOCK_STREAM, 0, pair) == -1) {
     LOG_ERROR(LOG_TAG, "%s unable to allocate socket pair: %s", __func__,
@@ -150,10 +158,9 @@ static sco_socket_t* sco_socket_establish_locked(bool is_listening,
     goto error;
   }
 
-  params = esco_parameters_for_codec(ESCO_CODEC_CVSD);
-  status = BTM_CreateSco(bd_addr, !is_listening, params.packet_types,
-                         &sco_socket->sco_handle, connect_completed_cb,
-                         disconnect_completed_cb);
+  status = BTM_CreateSco((uint8_t*)bd_addr, !is_listening,
+                         sco_parameters.packet_types, &sco_socket->sco_handle,
+                         connect_completed_cb, disconnect_completed_cb);
   if (status != BTM_CMD_STARTED) {
     LOG_ERROR(LOG_TAG, "%s unable to create SCO socket: %d", __func__, status);
     goto error;

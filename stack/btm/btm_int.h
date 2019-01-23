@@ -35,8 +35,6 @@
 #include "rfcdefs.h"
 
 #include "btm_api.h"
-#include "device/include/esco_parameters.h"
-
 #include "btm_ble_int.h"
 #include "btm_int_types.h"
 #include "smp_api.h"
@@ -170,7 +168,7 @@ extern bool btm_is_sco_active(uint16_t handle);
 extern void btm_remove_sco_links(const RawAddress& bda);
 extern bool btm_is_sco_active_by_bdaddr(const RawAddress& remote_bda);
 
-extern void btm_read_def_esco_mode(enh_esco_params_t* p_parms);
+extern tBTM_SCO_TYPE btm_read_def_esco_mode(tBTM_ESCO_PARAMS* p_parms);
 extern uint16_t btm_find_scb_by_handle(uint16_t handle);
 extern void btm_sco_flush_sco_data(uint16_t sco_inx);
 
