@@ -280,6 +280,20 @@
 #define BTM_SCO_INCLUDED TRUE /* TRUE includes SCO code */
 #endif
 
+
+/* Includes SCO if TRUE */
+#ifndef BTM_SCO_HCI_INCLUDED
+#define BTM_SCO_HCI_INCLUDED FALSE /* TRUE includes SCO over HCI code */
+#endif
+
+/* Includes WBS if TRUE */
+// TODO(eisenbch): Temporarily disable WBS; to be replaced with proper eSCO
+// setup
+#ifdef BTM_WBS_INCLUDED
+#undef BTM_WBS_INCLUDED
+#endif
+#define BTM_WBS_INCLUDED FALSE /* TRUE includes WBS code */
+
 /*  This is used to work around a controller bug that doesn't like Disconnect
  *  issued while there is a role switch in progress
 */
