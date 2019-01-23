@@ -3666,11 +3666,11 @@ bool bta_dm_check_if_only_hd_connected(const RawAddress& peer_addr) {
         bta_dm_conn_srvcs.conn_srvc[j].peer_bdaddr == peer_addr) {
       APPL_TRACE_DEBUG("%s: Another profile (id=%d) is connected", __func__,
                        bta_dm_conn_srvcs.conn_srvc[j].id);
-      return false;
+      return FALSE;
     }
   }
 
-  return true;
+  return TRUE;
 }
 
 /*******************************************************************************

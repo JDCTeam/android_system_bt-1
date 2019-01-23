@@ -21,7 +21,7 @@
 
 #include "bt_target.h"
 #include "device/include/esco_parameters.h"
-#include "hcidefs.h"
+#include "hcimsgs.h"
 #include "smp_api_types.h"
 
 /* Maximum number of bytes allowed for vendor specific command parameters */

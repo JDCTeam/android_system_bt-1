@@ -1092,10 +1092,11 @@ void btif_rc_handler(tBTA_AV_EVT event, tBTA_AV* p_data) {
 
 bool btif_rc_is_connected_peer(const RawAddress& peer_addr) {
   for (int idx = 0; idx < BTIF_RC_NUM_CONN; idx++) {
-    btif_rc_device_cb_t* p_dev = get_connected_device(idx);
-    if (p_dev != NULL && (p_dev->rc_connected == TRUE) &&
-        peer_addr == p_dev->rc_addr) {
-      return true;
+
+    p_dev = get_connected_device(idx);
+    if (p_dev != NULL && (p_dev->rc_connected == TRUE)) {
+      bdcpy(peer_addr, p_dev->rc_addr);
+      return TRUE;
     }
   }
   return false;

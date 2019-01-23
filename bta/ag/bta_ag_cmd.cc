@@ -843,14 +843,16 @@ void bta_ag_at_hfp_cback(tBTA_AG_SCB* p_scb, uint16_t cmd, uint8_t arg_type,
   tBTA_AG_SCB* ag_scb;
   uint32_t i, ind_id;
   uint32_t bia_masked_out;
+
+  tBTA_AG_PEER_CODEC codec_type, codec_sent;
   if (p_arg == nullptr) {
     APPL_TRACE_ERROR("%s: p_arg is null, send error and return", __func__);
     bta_ag_send_error(p_scb, BTA_AG_ERR_INV_CHAR_IN_TSTR);
     return;
   }
 
-  APPL_TRACE_DEBUG("%s: AT command %d, arg_type %d, int_arg %d, arg %s",
-                   __func__, cmd, arg_type, int_arg, p_arg);
+  APPL_TRACE_DEBUG("HFP AT cmd:%d arg_type:%d arg:%d arg:%s", cmd, arg_type,
+                   int_arg, p_arg);
 
   val.hdr.handle = bta_ag_scb_to_idx(p_scb);
   val.hdr.app_id = p_scb->app_id;
@@ -1241,8 +1243,7 @@ void bta_ag_at_hfp_cback(tBTA_AG_SCB* p_scb, uint16_t cmd, uint8_t arg_type,
       }
       break;
 
-    case BTA_AG_AT_BCS_EVT: {
-      tBTA_AG_PEER_CODEC codec_type, codec_sent;
+    case BTA_AG_AT_BCS_EVT:
       bta_ag_send_ok(p_scb);
       alarm_cancel(p_scb->codec_negotiation_timer);
 
@@ -1269,18 +1270,12 @@ void bta_ag_at_hfp_cback(tBTA_AG_SCB* p_scb, uint16_t cmd, uint8_t arg_type,
       /* send final codec info to callback */
       val.num = codec_sent;
       break;
-    }
-    case BTA_AG_LOCAL_EVT_BCC: {
-      if (!bta_ag_sco_is_active_device(p_scb->peer_addr)) {
-        LOG(WARNING) << __func__ << ": AT+BCC rejected as " << p_scb->peer_addr
-                     << " is not the active device";
-        bta_ag_send_error(p_scb, BTA_AG_ERR_OP_NOT_ALLOWED);
-        break;
-      }
+
+    case BTA_AG_LOCAL_EVT_BCC:
       bta_ag_send_ok(p_scb);
       bta_ag_sco_open(p_scb, tBTA_AG_DATA::kEmpty);
       break;
-    }
+    
     default:
       bta_ag_send_error(p_scb, BTA_AG_ERR_OP_NOT_SUPPORTED);
       break;

@@ -224,6 +224,9 @@ static void bta_hf_client_sco_create(tBTA_HF_CLIENT_CB* client_cb,
                                      bool is_orig) {
   tBTM_STATUS status;
 
+  uint8_t* p_bd_addr = NULL;
+  enh_esco_params_t params;
+
   APPL_TRACE_DEBUG("%s: %d", __func__, is_orig);
 
   /* Make sure this SCO handle is not already in use */
@@ -233,7 +236,8 @@ static void bta_hf_client_sco_create(tBTA_HF_CLIENT_CB* client_cb,
     return;
   }
 
-  enh_esco_params_t params = esco_parameters_for_codec(ESCO_CODEC_CVSD);
+
+  params = esco_parameters_for_codec(ESCO_CODEC_MSBC_T1);
 
   /* if initiating set current scb and peer bd addr */
   if (is_orig) {
